@@ -1,0 +1,31 @@
+{
+  "name": "@welldoingk/tidal-luna-ko-remote",
+  "description": "TidaLuna plugin for Korean track/artist metadata localization and LAN/VPN WebSocket remote control",
+  "type": "module",
+  "author": "welldoingk",
+  "scripts": {
+    "watch": "concurrently \"pnpm:build --watch\" pnpm:serve",
+    "build": "rimraf ./dist && tsx esbuild.config.ts",
+    "serve": "http-server ./dist -p 3000 -s --cors -c-1",
+    "test": "tsx test/verify.ts",
+    "simulate": "tsx test/simulate-search.ts"
+  },
+  "devDependencies": {
+    "@inrixia/helpers": "^3.20.3",
+    "@types/node": "^22.15.29",
+    "@types/react": "^19.2.6",
+    "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
+    "concurrently": "^9.1.2",
+    "electron": "^37.2.5",
+    "http-server": "^14.1.1",
+    "luna": "github:Inrixia/TidaLuna",
+    "oby": "^15.1.2",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
+  }
+}
