@@ -1838,17 +1838,15 @@ export async function resolveKoreanSearchQuery(query: string): Promise<KoreanSea
 				for (const [artistTerm, songTerm] of splits) {
 					const artist = await findForeignArtistByHangul(artistTerm);
 					if (!artist) continue;
+					// Only trust the split when the title part resolves too; otherwise common words that happen to be
+					// artist names ("오늘 듣기 좋은 노래" -> "O:neul") would hijack the search
+					const matched = await matchTitleByArtist(artist, songTerm);
+					if (!matched) continue;
 					out.koArtist = artistTerm;
-					out.enArtist = artist;
+					out.enArtist = matched.enArtist;
+					out.koTitle = matched.koTitle;
+					out.enTitle = matched.enTitle;
 					userSpecifiedArtist = true;
-					const hit = lookupHitTitle(songTerm);
-					const matched = hit ? null : await matchTitleByArtist(artist, songTerm);
-					if (hit || matched) {
-						out.koTitle = matched?.koTitle ?? songTerm;
-						out.enTitle = hit?.enTitle ?? matched!.enTitle;
-					} else {
-						isArtistOnlyQuery = true;
-					}
 					break splitSearch;
 				}
 			}
