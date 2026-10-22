@@ -16,12 +16,16 @@ export interface KoRemoteSettings {
 	patchTidalDom: boolean;
 	showFloatingKoBadge: boolean;
 	formatMode: DisplayFormatMode;
+	/** "section": show resolved songs above TIDAL's results; "rewrite": replace the Hangul query with English */
+	desktopSearchMode: "section" | "rewrite";
 	enableRemoteServer: boolean;
 	port: number;
 	bindHost: string;
 	authToken: string;
 	overrides: Record<string, { koTitle?: string; koArtist?: string }>;
 	cache: Record<string, KoreanTrackMeta>;
+	/** trackId -> time (ms) a lookup found no Korean metadata; skips repeat lookups for a while */
+	misses: Record<string, number>;
 }
 
 export const settings = await ReactiveStore.getPluginStorage<KoRemoteSettings>("ko-remote", {
@@ -29,12 +33,14 @@ export const settings = await ReactiveStore.getPluginStorage<KoRemoteSettings>("
 	patchTidalDom: true,
 	showFloatingKoBadge: true,
 	formatMode: "ko_with_orig",
+	desktopSearchMode: "section",
 	enableRemoteServer: true,
 	port: 24123,
 	bindHost: "0.0.0.0",
 	authToken: "",
 	overrides: {},
 	cache: {},
+	misses: {},
 });
 
 export const Settings = () => {
@@ -42,6 +48,7 @@ export const Settings = () => {
 	const [patchTidalDom, setPatchTidalDom] = React.useState(settings.patchTidalDom);
 	const [showFloatingKoBadge, setShowFloatingKoBadge] = React.useState(settings.showFloatingKoBadge);
 	const [formatMode, setFormatMode] = React.useState<DisplayFormatMode>(settings.formatMode);
+	const [desktopSearchMode, setDesktopSearchMode] = React.useState(settings.desktopSearchMode);
 	const [enableRemoteServer, setEnableRemoteServer] = React.useState(settings.enableRemoteServer);
 	const [port, setPort] = React.useState(String(settings.port));
 	const [bindHost, setBindHost] = React.useState(settings.bindHost);
@@ -81,6 +88,20 @@ export const Settings = () => {
 				<LunaSelectItem value="ko_with_orig">한글 우선 + 원제 병기 — 예: 밤편지 (Through the Night)</LunaSelectItem>
 				<LunaSelectItem value="ko_only">한글만 표시 — 예: 밤편지</LunaSelectItem>
 				<LunaSelectItem value="orig_with_ko">원제 우선 + 한글 병기 — 예: Through the Night (밤편지)</LunaSelectItem>
+			</LunaSelectSetting>
+
+			<LunaSelectSetting<"section" | "rewrite">
+				title="데스크톱 한글 검색 방식"
+				desc="TIDAL 검색창에 한글로 검색했을 때 원곡을 보여주는 방식입니다."
+				value={desktopSearchMode}
+				onChange={(e: { target: { value: unknown } }) => {
+					const v = e.target.value === "rewrite" ? "rewrite" : "section";
+					setDesktopSearchMode(v);
+					settings.desktopSearchMode = v;
+				}}
+			>
+				<LunaSelectItem value="section">검색 결과 위에 따로 표시 (검색어 그대로 유지)</LunaSelectItem>
+				<LunaSelectItem value="rewrite">검색어를 영어로 바꿔 다시 검색 (기존 방식)</LunaSelectItem>
 			</LunaSelectSetting>
 
 			<LunaSwitchSetting
@@ -158,6 +179,7 @@ export const Settings = () => {
 				desc="저장된 한글 변환 캐시를 비우고 다시 조회하도록 초기화합니다."
 				onClick={() => {
 					settings.cache = {};
+					settings.misses = {};
 					setCacheCount(0);
 				}}
 			>

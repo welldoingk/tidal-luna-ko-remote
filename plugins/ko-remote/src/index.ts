@@ -9,6 +9,7 @@ import {
 	resolveKoreanSearchQuery,
 	setCustomJsonFetcher,
 } from "./koreanResolver";
+import { initDesktopSearchSection } from "./desktopSearchSection";
 import { nativeFetchJson, pushRemoteState, startRemoteServer, stopRemoteServer } from "./server.native";
 import { Settings, settings } from "./Settings";
 import type { KoreanTrackMeta, QueueTrackItem, RemoteCommandPayload, SearchTrackItem } from "./types";
@@ -208,6 +209,19 @@ function patchFooterPlayerDom(meta: KoreanTrackMeta) {
 	}
 }
 
+const MISS_TTL_MS = 24 * 60 * 60 * 1000;
+const MISS_MAX = 3000;
+
+/** Keeps the persisted miss list bounded: drop expired entries once it grows past MISS_MAX */
+function pruneMisses() {
+	const ids = Object.keys(settings.misses);
+	if (ids.length <= MISS_MAX) return;
+	const now = Date.now();
+	for (const missId of ids) {
+		if (now - settings.misses[missId] >= MISS_TTL_MS) delete settings.misses[missId];
+	}
+}
+
 /**
  * Resolves Korean metadata for a track and caches it in plugin storage
  */
@@ -229,6 +243,26 @@ async function resolveAndCacheTrack(
 		const override = settings.overrides?.[id] ?? null;
 		const cached = !forceRefresh ? (settings.cache?.[id] ?? null) : null;
 
+		// Recently found nothing for this track (non-Korean song): skip the MusicBrainz/iTunes round trip
+		const missAt = settings.misses?.[id];
+		if (!forceRefresh && !override && !cached && missAt && Date.now() - missAt < MISS_TTL_MS) {
+			return {
+				trackId: id,
+				isrc: isrc ?? null,
+				originalTitle: title,
+				originalArtist: artist,
+				originalAlbum: album,
+				koTitle: null,
+				koArtist: null,
+				displayTitle: title,
+				displayArtist: artist,
+				displayAlbum: album,
+				isKorean: false,
+				source: "none",
+				updatedAt: missAt,
+			} satisfies KoreanTrackMeta;
+		}
+
 		const resolved = await resolveKoreanMetadata({
 			trackId: id,
 			title,
@@ -246,6 +280,10 @@ async function resolveAndCacheTrack(
 		// settings write is lost on restart.
 		if (resolved.koTitle || resolved.koArtist) {
 			settings.cache[id] = resolved;
+			if (id in settings.misses) delete settings.misses[id];
+		} else if (!override) {
+			settings.misses[id] = Date.now();
+			pruneMisses();
 		}
 		return resolved;
 	})();
@@ -526,7 +564,23 @@ async function searchTidalTracks(query: string): Promise<SearchTrackItem[]> {
 			if (itemsMap.size >= 10) break;
 		}
 
-		const items = Array.from(itemsMap.values());
+		// Exact title (and artist) matches of the resolved song first; region-locked tracks are dropped because
+		// ISRC/top-track lookups ignore region and clicking them would do nothing.
+		const baseTitle = (s: string) =>
+			s
+				.toLowerCase()
+				.replace(/[(\[{][^)\]}]*[)\]}]/g, " ")
+				.replace(/[^a-z0-9\uac00-\ud7a3]+/g, "");
+		const wantTitles = [koResolution?.enTitle, koResolution?.koTitle].filter(Boolean).map((s) => baseTitle(s!));
+		const wantArtist = koResolution?.enArtist?.toLowerCase();
+		const matchScore = (t: any) =>
+			(wantTitles.includes(baseTitle(String(t.title || ""))) ? 2 : 0) +
+			(wantArtist && String(t.artist?.name || t.artists?.[0]?.name || "").toLowerCase() === wantArtist ? 1 : 0);
+		const items = Array.from(itemsMap.values())
+			.filter((t) => t.allowStreaming !== false)
+			.map((t, index) => ({ t, index, score: matchScore(t) }))
+			.sort((a, b) => b.score - a.score || a.index - b.index)
+			.map(({ t }) => t);
 
 		// Pre-populate Korean cache for matched tracks if resolved from a Korean query
 		if (koResolution?.koTitle && koResolution.enTitle) {
@@ -615,8 +669,15 @@ function setReactInputValue(input: HTMLInputElement, value: string) {
 	} catch {}
 }
 
+initDesktopSearchSection(unloads, {
+	isEnabled: () => settings.enableKoreanPatch && settings.desktopSearchMode !== "rewrite",
+	hasHangul,
+	search: searchTidalTracks,
+	play: (trackId) => void window.__koRemoteInvokeCommand?.({ action: "playTrack", trackId }),
+});
+
 function triggerDesktopKoreanSearch(trimmed: string) {
-	if (!settings.enableKoreanPatch) return;
+	if (!settings.enableKoreanPatch || settings.desktopSearchMode !== "rewrite") return;
 	if (!hasHangul(trimmed) || (trimmed.length < 2 && !lookupEnglishArtistName(trimmed))) return;
 	if (trimmed === lastTranslatedSearchSource || trimmed === lastTranslatedSearchTarget) return;
 

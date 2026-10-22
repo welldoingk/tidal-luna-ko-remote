@@ -1836,6 +1836,21 @@ async function resolveKoreanSearchQueryUncached(query: string): Promise<KoreanSe
 		}
 	}
 
+	// Step 2.5: Apple US-search -> KR-lookup title match, for title-only queries. Fills the title when MusicBrainz found
+	// nothing; when it found a different song, the Apple pick becomes an extra candidate ("사랑으로": HYNN vs wave to earth).
+	let appleAlternative: string | undefined;
+	if (!userSpecifiedArtist && !isArtistOnlyQuery && !dictHit && hasHangul(songPart)) {
+		const apple = await findByAppleKoreanTitle(songPart);
+		if (apple && !out.enTitle) {
+			out.koTitle = apple.koTitle;
+			out.enTitle = apple.enTitle;
+			out.enArtist = apple.enArtist || undefined;
+			userSpecifiedArtist = Boolean(apple.enArtist);
+		} else if (apple && normalizeTitleForCompare(apple.enTitle) !== normalizeTitleForCompare(out.enTitle!)) {
+			appleAlternative = `${apple.enTitle} ${apple.enArtist}`.trim();
+		}
+	}
+
 	// Step 3: Dynamic MusicBrainz Artist Alias Lookup (if query is a Korean artist name not in static dictionary)
 	if (!out.enTitle && !out.enArtist && hasHangul(clean)) {
 		const mbArtistUrl = `https://musicbrainz.org/ws/2/artist?query=${encodeURIComponent(`alias:"${clean}" OR artist:"${clean}"`)}&fmt=json&limit=5`;
@@ -1941,6 +1956,7 @@ async function resolveKoreanSearchQueryUncached(query: string): Promise<KoreanSe
 			addCandidate(out.enTitle);
 		}
 	}
+	addCandidate(appleAlternative);
 
 	// Move English candidates to the front of searchQueries so TIDAL finds them first!
 	const enFirst = out.searchQueries.filter((q) => !hasHangul(q));
@@ -1994,6 +2010,34 @@ export function formatDisplayPair(
 		default:
 			return `${koTrim} (${origTrim})`;
 	}
+}
+
+/**
+ * Hangul title -> international release title without knowing the artist. The KR store's /search returns no songs,
+ * but the US store indexes Hangul titles too, and both stores share track ids: search US with the Hangul phrase,
+ * look the ids up in KR, keep the first hit whose Korean title equals the query ("영원은 그렇듯" -> Forever Has Always Been).
+ */
+async function findByAppleKoreanTitle(koQuery: string): Promise<{ koTitle: string; enTitle: string; enArtist: string } | null> {
+	const us = await fetchJsonWithTimeout<{ results?: Array<{ trackId?: number; trackName?: string; artistName?: string }> }>(
+		`https://itunes.apple.com/search?term=${encodeURIComponent(koQuery)}&country=US&media=music&entity=song&limit=15`,
+	);
+	const intl = (us?.results ?? []).filter((t) => t.trackId && t.trackName && !hasHangul(t.trackName));
+	if (intl.length === 0) return null;
+	const kr = await fetchJsonWithTimeout<{ results?: Array<{ trackId?: number; trackName?: string }> }>(
+		`https://itunes.apple.com/lookup?id=${intl.map((t) => t.trackId).join(",")}&country=KR`,
+	);
+	const koById = new Map((kr?.results ?? []).map((t) => [t.trackId, t.trackName]));
+	const target = normalizeTitleForCompare(koQuery);
+	const karaoke = /\b(MR|Inst\.?|Instrumental|Karaoke)\b/i;
+	const usable = intl.filter((t) => !karaoke.test(t.trackName!) && !karaoke.test(koById.get(t.trackId) ?? ""));
+	const matched = usable.filter((t) => target && normalizeTitleForCompare(koById.get(t.trackId) ?? "") === target);
+	if (matched.length === 0) return null;
+	// Some originals carry their English title in the KR store too (백예린 "Across the universe"), so they miss the
+	// Korean-title check while covers pass it. Prefer a known K-artist whose English title equals a matched one.
+	const matchedTitles = new Set(matched.map((t) => normalizeTitleForCompare(t.trackName!)));
+	const pick =
+		usable.find((t) => lookupArtistDict(t.artistName) && matchedTitles.has(normalizeTitleForCompare(t.trackName!))) ?? matched[0];
+	return { koTitle: koQuery.trim(), enTitle: pick.trackName!, enArtist: pick.artistName ?? "" };
 }
 
 function normalizeTitleForCompare(str: string): string {

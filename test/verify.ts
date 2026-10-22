@@ -120,6 +120,8 @@ async function runTests() {
 		["매직숍", "Magic Shop BTS"],
 		["데이 식스", "day6"],
 		["ㅂㅍㅈ", "Through the Night IU"],
+		["영원은 그렇듯", "Forever Has Always Been Redoor"],
+		["우주를 건너", "Across the universe Yerin Baek"],
 		["셀레브레이트", null],
 		["오늘 듣기 좋은 노래", null],
 	];
