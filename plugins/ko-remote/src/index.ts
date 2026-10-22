@@ -240,11 +240,11 @@ async function resolveAndCacheTrack(
 			cached,
 		});
 
+		// Assign the nested key, never `settings.cache = { ...settings.cache }`: spreading the reactive store copies
+		// its Proxy children into the persisted object, IndexedDB then fails with DataCloneError and every later
+		// settings write is lost on restart.
 		if (resolved.koTitle || resolved.koArtist) {
-			settings.cache = {
-				...(settings.cache || {}),
-				[id]: resolved,
-			};
+			settings.cache[id] = resolved;
 		}
 		return resolved;
 	})();
@@ -514,9 +514,7 @@ async function searchTidalTracks(query: string): Promise<SearchTrackItem[]> {
 				if (!settings.cache?.[id] && tTitle.toLowerCase().includes(normEn)) {
 					const origArtist = String(t.artist?.name || t.artists?.[0]?.name || "");
 					const koArtist = lookupArtistDict(origArtist) || koResolution.koArtist || null;
-					settings.cache = {
-						...(settings.cache || {}),
-						[id]: {
+					settings.cache[id] = {
 							trackId: id,
 							isrc: t.isrc,
 							originalTitle: tTitle,
@@ -529,7 +527,6 @@ async function searchTidalTracks(query: string): Promise<SearchTrackItem[]> {
 							isKorean: true,
 							source: "itunes-kr",
 							updatedAt: Date.now(),
-						},
 					};
 				}
 			}
@@ -782,12 +779,9 @@ window.__koRemoteInvokeCommand = async (payload: RemoteCommandPayload) => {
 			return await searchTidalTracks(payload.query || "");
 		case "setOverride":
 			if (payload.trackId) {
-				settings.overrides = {
-					...(settings.overrides || {}),
-					[payload.trackId]: {
-						koTitle: payload.koTitle || undefined,
-						koArtist: payload.koArtist || undefined,
-					},
+				settings.overrides[payload.trackId] = {
+					koTitle: payload.koTitle || undefined,
+					koArtist: payload.koArtist || undefined,
 				};
 				const currentItem = await MediaItem.fromPlaybackContext();
 				if (currentItem && String(currentItem.id) === String(payload.trackId)) {
