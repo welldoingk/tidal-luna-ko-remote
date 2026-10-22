@@ -1,1 +1,1 @@
-{"name":"@luna/ko-remote","version":"1.0.0","description":"한국 음원 한글 제목/아티스트 자동 변환 + 내부망/VPN WebSocket 원격 제어 및 모바일 리모컨 웹앱","author":{"name":"welldoingk","url":"https://github.com/welldoingk"},"main":"./src/index.ts","type":"module","hash":"+Gy5vK0+oD8"}
+{"name":"@luna/ko-remote","version":"1.0.0","description":"한국 음원 한글 제목/아티스트 자동 변환 + 내부망/VPN WebSocket 원격 제어 및 모바일 리모컨 웹앱","author":{"name":"welldoingk","url":"https://github.com/welldoingk"},"main":"./src/index.ts","type":"module","hash":"/doQMio0IcQ"}
