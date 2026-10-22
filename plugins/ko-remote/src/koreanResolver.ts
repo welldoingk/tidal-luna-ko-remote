@@ -1393,7 +1393,109 @@ const KOREAN_PHONETIC_AND_HIT_TITLES: Record<
 	"드라이 플라워": { enTitle: "Dry Flower", enArtist: "Yuuri" },
 	"드라이플라워": { enTitle: "Dry Flower", enArtist: "Yuuri" },
 	"블링방방본": { enTitle: "Bling-Bang-Bang-Born", enArtist: "Creepy Nuts" },
+	"매직 숍": { enTitle: "Magic Shop", enArtist: "BTS", koArtist: "방탄소년단" },
+	"레몬": { enTitle: "Lemon", enArtist: "Kenshi Yonezu" },
+	"케세라세라": { enTitle: "Que Sera Sera", enArtist: "Mrs. GREEN APPLE" },
+	"쉐이프 오브 유": { enTitle: "Shape of You", enArtist: "Ed Sheeran" },
+	"셰이프 오브 유": { enTitle: "Shape of You", enArtist: "Ed Sheeran" },
 };
+
+// Same dictionary keyed without spaces, so "매직숍" and "매직 숍" both hit
+const HIT_TITLES_NO_SPACE = new Map(
+	Object.entries(KOREAN_PHONETIC_AND_HIT_TITLES).map(([k, v]) => [k.replace(/\s+/g, ""), v]),
+);
+
+function lookupHitTitle(text: string) {
+	return KOREAN_PHONETIC_AND_HIT_TITLES[text] ?? HIT_TITLES_NO_SPACE.get(text.replace(/\s+/g, ""));
+}
+
+// Revised-Romanization-ish consonant tables for Hangul syllables (initial / final jamo)
+const CHO_LATIN = ["g", "g", "n", "d", "d", "l", "m", "b", "b", "s", "s", "", "j", "j", "s", "k", "t", "p", "h"];
+const JONG_LATIN = ["", "g", "g", "gs", "n", "nj", "n", "d", "l", "lg", "lm", "lb", "ls", "lt", "lp", "l", "m", "b", "bs", "s", "s", "ng", "j", "s", "k", "t", "p", ""];
+
+/** Reduces Hangul or Latin text to a coarse consonant skeleton ("테일러 스위프트" and "Taylor Swift" -> "tlspt"). */
+function consonantSkeleton(text: string): string {
+	let latin = "";
+	for (const ch of text.toLowerCase()) {
+		const code = ch.charCodeAt(0) - 0xac00;
+		latin += code >= 0 && code < 11172 ? CHO_LATIN[Math.floor(code / 588)] + JONG_LATIN[code % 28] : ch;
+	}
+	return latin
+		.replace(/ph/g, "p")
+		.replace(/ch/g, "s")
+		.replace(/[^a-z0-9]/g, "")
+		.replace(/[bpfv]/g, "p")
+		.replace(/[dt]/g, "t")
+		.replace(/[gkqcx]/g, "k")
+		.replace(/[szj]/g, "s")
+		.replace(/r/g, "l")
+		.replace(/[aeiouyhw]/g, "")
+		.replace(/(.)\1+/g, "$1");
+}
+
+/** Bigram Dice similarity of consonant skeletons: does a Hangul transliteration plausibly spell a Latin name? */
+function phoneticSimilarity(hangul: string, latin: string): number {
+	const a = consonantSkeleton(hangul);
+	const b = consonantSkeleton(latin);
+	if (a.length < 2 || b.length < 2) return a === b && a.length > 0 ? 1 : 0;
+	const counts = new Map<string, number>();
+	for (let i = 0; i < a.length - 1; i++) counts.set(a.slice(i, i + 2), (counts.get(a.slice(i, i + 2)) ?? 0) + 1);
+	let shared = 0;
+	for (let i = 0; i < b.length - 1; i++) {
+		const n = counts.get(b.slice(i, i + 2)) ?? 0;
+		if (n > 0) {
+			shared++;
+			counts.set(b.slice(i, i + 2), n - 1);
+		}
+	}
+	return (2 * shared) / (a.length - 1 + (b.length - 1));
+}
+
+/** iTunes KR artist search, trusted only when the top hit is a Latin name that sounds like the Hangul term. */
+async function findForeignArtistByHangul(term: string): Promise<string | undefined> {
+	const res = await fetchJsonWithTimeout<{ results?: Array<{ artistName?: string }> }>(
+		`https://itunes.apple.com/search?term=${encodeURIComponent(term)}&country=KR&lang=ko_kr&media=music&entity=musicArtist&limit=1`,
+	);
+	const name = res?.results?.[0]?.artistName?.trim();
+	return name && !hasHangul(name) && phoneticSimilarity(term, name) >= 0.5 ? name : undefined;
+}
+
+/**
+ * Finds the English title of an artist's song from its Korean title: iTunes US song list of the artist,
+ * then one batched KR-locale lookup to compare localized titles.
+ */
+async function matchTitleByArtist(
+	enArtist: string,
+	koSong: string,
+): Promise<{ koTitle: string; enTitle: string; enArtist: string; enAlbum?: string } | null> {
+	const usArtistSongs = await fetchJsonWithTimeout<{
+		results?: Array<{ trackId: number; trackName: string; artistName: string; collectionName?: string }>;
+	}>(`https://itunes.apple.com/search?term=${encodeURIComponent(enArtist)}&country=US&media=music&entity=song&limit=60`);
+	const usList = usArtistSongs?.results ?? [];
+	if (usList.length === 0) return null;
+	const ids = usList.map((r) => r.trackId).filter(Boolean).slice(0, 60).join(",");
+	const krBatch = await fetchJsonWithTimeout<{
+		results?: Array<{ trackId: number; trackName?: string }>;
+	}>(`https://itunes.apple.com/lookup?id=${ids}&country=KR&lang=ko_kr`);
+	const normTarget = normalizeTitleForCompare(koSong);
+	const usById = new Map(usList.map((r) => [r.trackId, r]));
+	for (const krItem of krBatch?.results ?? []) {
+		if (!krItem.trackName) continue;
+		const normKr = normalizeTitleForCompare(krItem.trackName);
+		if (normKr && (normKr === normTarget || normKr.includes(normTarget) || normTarget.includes(normKr))) {
+			const matchedUs = usById.get(krItem.trackId);
+			if (matchedUs?.trackName && !hasHangul(matchedUs.trackName)) {
+				return {
+					koTitle: krItem.trackName,
+					enTitle: matchedUs.trackName,
+					enArtist: matchedUs.artistName || enArtist,
+					enAlbum: matchedUs.collectionName,
+				};
+			}
+		}
+	}
+	return null;
+}
 
 function lookupEnglishArtistFromKorean(koName?: string | null): string | undefined {
 	if (!koName) return undefined;
@@ -1433,26 +1535,26 @@ export async function resolveKoreanSearchQuery(query: string): Promise<KoreanSea
 	let songPart = clean;
 	let userSpecifiedArtist = false;
 	let isArtistOnlyQuery = false;
+	// Spaces inside the artist name are optional ("아이 유 밤편지", "데이 식스")
 	const artistEntries = Object.entries(KOREAN_ARTIST_DICT).sort((a, b) => b[1].length - a[1].length);
 	for (const [enKey, koVal] of artistEntries) {
-		if (clean === koVal) {
+		const pat = koVal
+			.replace(/\s+/g, "")
+			.split("")
+			.map((c) => c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+			.join("\\s*");
+		const prefix = clean.match(new RegExp(`^${pat}\\s+(.+)$`));
+		const suffix = clean.match(new RegExp(`^(.+?)\\s+${pat}$`));
+		if (new RegExp(`^${pat}$`).test(clean)) {
+			songPart = koVal;
 			out.koArtist = koVal;
 			out.enArtist = enKey;
 			userSpecifiedArtist = true;
 			isArtistOnlyQuery = true;
 			addCandidate(enKey);
 			break;
-		} else if (clean.startsWith(koVal + " ")) {
-			songPart = clean.slice(koVal.length).trim();
-			out.koArtist = koVal;
-			out.enArtist = enKey;
-			userSpecifiedArtist = true;
-			if (!hasHangul(songPart)) {
-				addCandidate(`${enKey} ${songPart}`);
-			}
-			break;
-		} else if (clean.endsWith(" " + koVal)) {
-			songPart = clean.slice(0, clean.length - koVal.length).trim();
+		} else if (prefix || suffix) {
+			songPart = (prefix ? prefix[1] : suffix![1]).trim();
 			out.koArtist = koVal;
 			out.enArtist = enKey;
 			userSpecifiedArtist = true;
@@ -1463,8 +1565,22 @@ export async function resolveKoreanSearchQuery(query: string): Promise<KoreanSea
 		}
 	}
 
+	// Latin artist name before/after a Hangul title ("BTS 봄날", "밤편지 IU", "YOASOBI 아이돌")
+	if (!userSpecifiedArtist) {
+		const latinPrefix = clean.match(/^([A-Za-z0-9][A-Za-z0-9 .&'-]*?)\s+(.*[\uAC00-\uD7AF].*)$/);
+		const latinSuffix = clean.match(/^(.*[\uAC00-\uD7AF].*?)\s+([A-Za-z0-9][A-Za-z0-9 .&'-]*)$/);
+		const latinArtist = latinPrefix?.[1] ?? latinSuffix?.[2];
+		const hangulSong = latinPrefix?.[2] ?? latinSuffix?.[1];
+		if (latinArtist && hangulSong) {
+			songPart = hangulSong.trim();
+			out.enArtist = latinArtist.trim();
+			out.koArtist = lookupArtistDict(out.enArtist) || undefined;
+			userSpecifiedArtist = true;
+		}
+	}
+
 	// Step 0: Check built-in phonetic & hit song dictionary
-	const dictHit = KOREAN_PHONETIC_AND_HIT_TITLES[songPart] || KOREAN_PHONETIC_AND_HIT_TITLES[clean];
+	const dictHit = lookupHitTitle(songPart) || lookupHitTitle(clean);
 	if (dictHit) {
 		out.koTitle = songPart;
 		out.enTitle = dictHit.enTitle;
@@ -1475,31 +1591,12 @@ export async function resolveKoreanSearchQuery(query: string): Promise<KoreanSea
 
 	// Step 0.5: If artist is known and we don't have enTitle yet, perform iTunes US search + single batch KR lookup!
 	if (!out.enTitle && out.enArtist && hasHangul(songPart) && songPart !== out.koArtist) {
-		const usArtistSongs = await fetchJsonWithTimeout<{
-			results?: Array<{ trackId: number; trackName: string; artistName: string; collectionName?: string }>;
-		}>(`https://itunes.apple.com/search?term=${encodeURIComponent(out.enArtist)}&country=US&media=music&entity=song&limit=60`);
-		const usList = usArtistSongs?.results ?? [];
-		if (usList.length > 0) {
-			const ids = usList.map((r) => r.trackId).filter(Boolean).slice(0, 60).join(",");
-			const krBatch = await fetchJsonWithTimeout<{
-				results?: Array<{ trackId: number; trackName?: string }>;
-			}>(`https://itunes.apple.com/lookup?id=${ids}&country=KR&lang=ko_kr`);
-			const normTarget = normalizeTitleForCompare(songPart);
-			const usById = new Map(usList.map((r) => [r.trackId, r]));
-			for (const krItem of krBatch?.results ?? []) {
-				if (!krItem.trackName) continue;
-				const normKr = normalizeTitleForCompare(krItem.trackName);
-				if (normKr && (normKr === normTarget || normKr.includes(normTarget) || normTarget.includes(normKr))) {
-					const matchedUs = usById.get(krItem.trackId);
-					if (matchedUs?.trackName && !hasHangul(matchedUs.trackName)) {
-						out.koTitle = krItem.trackName;
-						out.enTitle = matchedUs.trackName;
-						out.enArtist = matchedUs.artistName || out.enArtist;
-						out.enAlbum = matchedUs.collectionName || out.enAlbum;
-						break;
-					}
-				}
-			}
+		const matched = await matchTitleByArtist(out.enArtist, songPart);
+		if (matched) {
+			out.koTitle = matched.koTitle;
+			out.enTitle = matched.enTitle;
+			out.enArtist = matched.enArtist;
+			out.enAlbum = matched.enAlbum || out.enAlbum;
 		}
 	}
 
@@ -1696,6 +1793,64 @@ export async function resolveKoreanSearchQuery(query: string): Promise<KoreanSea
 				isArtistOnlyQuery = true;
 				KOREAN_ARTIST_DICT[resolvedEn.toLowerCase()] = clean;
 				break;
+			}
+		}
+
+		// Step 3.5: iTunes KR artist search knows Hangul transliterations of foreign artists that MusicBrainz lacks
+		// ("미세스그린애플" -> "Mrs. GREEN APPLE", "요아소비" -> "YOASOBI"). Hits must sound like the query, and are
+		// not written to KOREAN_ARTIST_DICT so TIDAL display text stays unchanged.
+		// A split whose title part is a known hit ("요네즈 켄시 레몬") wins over treating the whole query as an artist
+		const words = clean.split(/\s+/);
+		for (let k = 1; k < words.length && !out.enArtist; k++) {
+			for (const [artistTerm, songTerm] of [
+				[words.slice(0, k).join(" "), words.slice(k).join(" ")],
+				[words.slice(k).join(" "), words.slice(0, k).join(" ")],
+			]) {
+				const hit = lookupHitTitle(songTerm);
+				if (!hit) continue;
+				const artist = await findForeignArtistByHangul(artistTerm);
+				if (!artist) continue;
+				out.koArtist = artistTerm;
+				out.enArtist = artist;
+				out.koTitle = songTerm;
+				out.enTitle = hit.enTitle;
+				userSpecifiedArtist = true;
+				break;
+			}
+		}
+
+		if (!out.enArtist) {
+			const wholeArtist = await findForeignArtistByHangul(clean);
+			if (wholeArtist) {
+				out.koArtist = clean;
+				out.enArtist = wholeArtist;
+				isArtistOnlyQuery = true;
+			}
+		}
+
+		// Step 3.6: "<foreign artist> <title>" or "<title> <foreign artist>" ("요네즈 켄시 레몬", "미세스그린애플 케세라세라")
+		if (!out.enArtist && words.length >= 2 && words.length <= 6) {
+			splitSearch: for (let k = Math.min(3, words.length - 1); k >= 1; k--) {
+				const splits: Array<[string, string]> = [
+					[words.slice(0, k).join(" "), words.slice(k).join(" ")],
+					[words.slice(words.length - k).join(" "), words.slice(0, words.length - k).join(" ")],
+				];
+				for (const [artistTerm, songTerm] of splits) {
+					const artist = await findForeignArtistByHangul(artistTerm);
+					if (!artist) continue;
+					out.koArtist = artistTerm;
+					out.enArtist = artist;
+					userSpecifiedArtist = true;
+					const hit = lookupHitTitle(songTerm);
+					const matched = hit ? null : await matchTitleByArtist(artist, songTerm);
+					if (hit || matched) {
+						out.koTitle = matched?.koTitle ?? songTerm;
+						out.enTitle = hit?.enTitle ?? matched!.enTitle;
+					} else {
+						isArtistOnlyQuery = true;
+					}
+					break splitSearch;
+				}
 			}
 		}
 	}
