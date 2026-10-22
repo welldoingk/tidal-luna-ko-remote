@@ -4,6 +4,7 @@ import {
 	formatDisplayPair,
 	hasHangul,
 	lookupArtistDict,
+	lookupEnglishArtistName,
 	resolveKoreanMetadata,
 	resolveKoreanSearchQuery,
 	setCustomJsonFetcher,
@@ -491,8 +492,30 @@ async function searchTidalTracks(query: string): Promise<SearchTrackItem[]> {
 			}
 		}
 
+		// 2) Artist-only query ("미세스그린애플", "태연"): the artist's top tracks beat a 15-row text search
+		const artistOnly = koResolution?.enArtist && !koResolution.enTitle ? koResolution.enArtist : null;
+		if (artistOnly) {
+			try {
+				const found = await TidalApi.fetch<{ items?: Array<{ id: number; name?: string }> }>(
+					`https://desktop.tidal.com/v1/search/artists?query=${encodeURIComponent(artistOnly)}&limit=3&offset=0&${queryArgs}`,
+				);
+				const artist = found?.items?.find((a) => a.name?.toLowerCase() === artistOnly.toLowerCase());
+				if (artist) {
+					const top = await TidalApi.fetch<{ items?: any[] }>(
+						`https://desktop.tidal.com/v1/artists/${artist.id}/toptracks?limit=20&offset=0&${queryArgs}`,
+					);
+					for (const item of top?.items ?? []) {
+						if (item?.id && !itemsMap.has(String(item.id))) itemsMap.set(String(item.id), item);
+					}
+				}
+			} catch (err) {
+				trace.warn("artist top tracks lookup failed:", err);
+			}
+		}
+
 		const candidateQueries = koResolution ? koResolution.searchQueries : [trimmed];
 		for (const q of candidateQueries.slice(0, 3)) {
+			if (itemsMap.size >= 20) break;
 			const url = `https://desktop.tidal.com/v1/search/tracks?query=${encodeURIComponent(q)}&limit=15&offset=0&${queryArgs}`;
 			const res = await TidalApi.fetch<{ items?: any[] }>(url);
 			for (const item of res?.items ?? []) {
@@ -594,7 +617,7 @@ function setReactInputValue(input: HTMLInputElement, value: string) {
 
 function triggerDesktopKoreanSearch(trimmed: string) {
 	if (!settings.enableKoreanPatch) return;
-	if (!hasHangul(trimmed) || trimmed.length < 2) return;
+	if (!hasHangul(trimmed) || (trimmed.length < 2 && !lookupEnglishArtistName(trimmed))) return;
 	if (trimmed === lastTranslatedSearchSource || trimmed === lastTranslatedSearchTarget) return;
 
 	lastTranslatedSearchSource = trimmed;
@@ -634,7 +657,8 @@ redux.intercept("search/SEARCH_COMMIT", unloads, (phrase) => {
 redux.intercept("search/SET_SEARCH_PHRASE", unloads, (payload) => {
 	if (!settings.enableKoreanPatch || !payload || typeof payload.searchPhrase !== "string") return;
 	const trimmed = payload.searchPhrase.trim();
-	if (!hasHangul(trimmed) || trimmed.length < 2) return;
+	// Single syllables only when they are a known artist ("비" -> Rain)
+	if (!hasHangul(trimmed) || (trimmed.length < 2 && !lookupEnglishArtistName(trimmed))) return;
 	if (searchInputDebounceTimer) clearTimeout(searchInputDebounceTimer);
 	searchInputDebounceTimer = setTimeout(() => {
 		triggerDesktopKoreanSearch(trimmed);

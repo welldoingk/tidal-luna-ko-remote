@@ -1398,6 +1398,18 @@ const KOREAN_PHONETIC_AND_HIT_TITLES: Record<
 	"케세라세라": { enTitle: "Que Sera Sera", enArtist: "Mrs. GREEN APPLE" },
 	"쉐이프 오브 유": { enTitle: "Shape of You", enArtist: "Ed Sheeran" },
 	"셰이프 오브 유": { enTitle: "Shape of You", enArtist: "Ed Sheeran" },
+	"킥 백": { enTitle: "KICK BACK", enArtist: "Kenshi Yonezu" },
+	"플라밍고": { enTitle: "Flamingo", enArtist: "Kenshi Yonezu" },
+	"마리골드": { enTitle: "Marigold", enArtist: "Aimyon" },
+	"프리텐더": { enTitle: "Pretender", enArtist: "OFFICIAL HIGE DANDISM" },
+	"요루니카케루": { enTitle: "Yoru ni Kakeru", enArtist: "YOASOBI" },
+	"배드 가이": { enTitle: "bad guy", enArtist: "Billie Eilish" },
+	"블라인딩 라이츠": { enTitle: "Blinding Lights", enArtist: "The Weeknd" },
+	"애즈 잇 워즈": { enTitle: "As It Was", enArtist: "Harry Styles" },
+	"에즈 잇 워즈": { enTitle: "As It Was", enArtist: "Harry Styles" },
+	"레비테이팅": { enTitle: "Levitating", enArtist: "Dua Lipa" },
+	"안티 히어로": { enTitle: "Anti-Hero", enArtist: "Taylor Swift" },
+	"크루얼 서머": { enTitle: "Cruel Summer", enArtist: "Taylor Swift" },
 };
 
 // Same dictionary keyed without spaces, so "매직숍" and "매직 숍" both hit
@@ -1513,6 +1525,47 @@ function lookupEnglishArtistFromKorean(koName?: string | null): string | undefin
  * Public Domain (CC0 MusicBrainz) + official iTunes Search APIs!
  */
 export async function resolveKoreanSearchQuery(query: string): Promise<KoreanSearchResolution> {
+	const key = query.trim().replace(/\s+/g, " ");
+	if (!hasHangul(key)) return resolveKoreanSearchQueryUncached(key);
+
+	const entry = searchResolutionCache.get(key);
+	if (entry) {
+		const res = await entry.promise;
+		// Unresolved results may come from a network hiccup, so retry them sooner
+		const ttl = res.searchQueries.some((q) => !hasHangul(q)) ? SEARCH_CACHE_TTL_MS : SEARCH_CACHE_MISS_TTL_MS;
+		if (Date.now() - entry.at < ttl) return res;
+	}
+
+	const promise = resolveKoreanSearchQueryUncached(key);
+	searchResolutionCache.delete(key);
+	searchResolutionCache.set(key, { at: Date.now(), promise });
+	promise.catch(() => searchResolutionCache.delete(key));
+	if (searchResolutionCache.size > SEARCH_CACHE_MAX) {
+		const oldest = searchResolutionCache.keys().next().value;
+		if (oldest !== undefined) searchResolutionCache.delete(oldest);
+	}
+	return promise;
+}
+
+// In-memory cache of search resolutions: repeated searches skip the 1-5 s MusicBrainz/iTunes round trips
+const SEARCH_CACHE_MAX = 200;
+const SEARCH_CACHE_TTL_MS = 30 * 60_000;
+const SEARCH_CACHE_MISS_TTL_MS = 60_000;
+const searchResolutionCache = new Map<string, { at: number; promise: Promise<KoreanSearchResolution> }>();
+
+const CHOSUNG = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ";
+
+/** "밤편지" -> "ㅂㅍㅈ" (spaces dropped, non-syllables kept as-is) */
+function toChosung(text: string): string {
+	let out = "";
+	for (const ch of text.replace(/\s+/g, "")) {
+		const code = ch.charCodeAt(0) - 0xac00;
+		out += code >= 0 && code < 11172 ? CHOSUNG[Math.floor(code / 588)] : ch;
+	}
+	return out;
+}
+
+async function resolveKoreanSearchQueryUncached(query: string): Promise<KoreanSearchResolution> {
 	const clean = query.trim();
 	const out: KoreanSearchResolution = {
 		originalQuery: clean,
@@ -1530,6 +1583,27 @@ export async function resolveKoreanSearchQuery(query: string): Promise<KoreanSea
 			out.searchQueries.push(trimmed);
 		}
 	};
+
+	// Initial-consonant (초성) queries like "ㅂㅍㅈ" are matched against the built-in title/artist dictionaries only
+	const chosungQuery = clean.replace(/\s+/g, "");
+	if (/^[\u3131-\u314E]{2,}$/.test(chosungQuery)) {
+		for (const [koTitle, hit] of Object.entries(KOREAN_PHONETIC_AND_HIT_TITLES)) {
+			if (toChosung(koTitle) !== chosungQuery) continue;
+			if (!out.enTitle) {
+				out.koTitle = koTitle;
+				out.enTitle = hit.enTitle;
+				out.enArtist = hit.enArtist;
+				out.koArtist = hit.koArtist;
+				out.isrc = hit.isrc;
+			}
+			addCandidate(hit.enArtist ? `${hit.enTitle} ${hit.enArtist}` : hit.enTitle);
+		}
+		for (const [enKey, koVal] of Object.entries(KOREAN_ARTIST_DICT)) {
+			if (toChosung(koVal) === chosungQuery) addCandidate(enKey);
+		}
+		out.searchQueries = [...out.searchQueries.filter((q) => !hasHangul(q)), ...out.searchQueries.filter(hasHangul)];
+		return out;
+	}
 
 	// Extract known Korean artist prefix or suffix if present (e.g. "태연 사계", "데이식스 예뻤어")
 	let songPart = clean;

@@ -109,6 +109,36 @@ async function runTests() {
 		);
 	}
 
+	// Expected first TIDAL query per Korean input; null = must stay untranslated (false-positive guard)
+	const searchExpectations: Array<[string, string | null]> = [
+		["미세스그린애플", "Mrs. GREEN APPLE"],
+		["미세스 그린 애플", "Mrs. GREEN APPLE"],
+		["요네즈 켄시 레몬", "Lemon Kenshi Yonezu"],
+		["미세스그린애플 케세라세라", "Que Sera Sera Mrs. GREEN APPLE"],
+		["BTS 봄날", "Spring Day BTS"],
+		["밤편지 IU", "Through the Night IU"],
+		["매직숍", "Magic Shop BTS"],
+		["데이 식스", "day6"],
+		["ㅂㅍㅈ", "Through the Night IU"],
+		["셀레브레이트", null],
+		["오늘 듣기 좋은 노래", null],
+	];
+	let searchFailures = 0;
+	for (const [koQuery, expected] of searchExpectations) {
+		const qRes = await resolveKoreanSearchQuery(koQuery);
+		const first = qRes.searchQueries[0];
+		const ok = expected === null ? first === koQuery : first === expected;
+		if (!ok) searchFailures++;
+		console.log(`  ${ok ? "✔" : "✘"} 검색어 "${koQuery}" => 1순위 "${first}" (기대: ${expected ?? "변환 없음"})`);
+	}
+	const cachedA = await resolveKoreanSearchQuery("미세스그린애플");
+	const cachedB = await resolveKoreanSearchQuery(" 미세스그린애플 ");
+	if (cachedA !== cachedB) searchFailures++;
+	console.log(`  ${cachedA === cachedB ? "✔" : "✘"} 같은 검색어 재조회는 캐시된 결과를 반환`);
+	if (searchFailures > 0 && !process.argv.includes("--demo")) {
+		throw new Error(`한글 검색어 변환 검증 ${searchFailures}건 실패`);
+	}
+
 	const isDemoServer = process.argv.includes("--demo");
 	const port = Number(process.env.PORT || 24123);
 
